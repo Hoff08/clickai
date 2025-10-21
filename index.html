@@ -13,6 +13,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com/" crossorigin="">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     
+    <!-- SDKs do Firebase -->
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
     
@@ -173,30 +174,37 @@ document.addEventListener('DOMContentLoaded', () => {
     const getEl = (id) => document.getElementById(id);
     const modalContainer = getEl('modal-container');
     const contentArea = getEl('content-area');
-    let allData = {};
+
+    // --- ARMAZENAMENTO LOCAL DOS DADOS ---
+    // Este objeto irá guardar os dados recebidos do Firebase
+    let localData = {
+        projects: {}, clients: {}, schedule: {}, tasks: {}, expenses: {}, revenues: {}, toReceive: {}, 
+        equipment: {}, checklist: { pre: {}, dia: {}, pos: {} }, inspirations: {}, marketingPosts: {}
+    };
+
     let currentSection = 'visao-geral';
     let calendarDate = new Date();
     let trajectoryChartInstance = null;
-
-    const defaultStructure = {
-        projects: [], clients: [], schedule: [], tasks: [], expenses: [], revenues: [], toReceive: [], 
-        equipment: [], checklist: { pre: [], dia: [], pos: [] }, inspirations: [], marketingPosts: []
-    };
-
-    // --- CARREGAMENTO E SALVAMENTO DE DADOS ---
-    const loadData = () => {
-        database.ref('allData/').on('value', (snapshot) => {
-            const data = snapshot.val();
-            allData = { ...defaultStructure, ...(data || {}) };
-            renderPage(currentSection); // Re-renderiza a página atual com os novos dados
-        });
-    };
-    const saveData = () => database.ref('allData/').set(allData);
-
+    
     // --- FUNÇÕES UTILITÁRIAS ---
     const formatCurrency = (value) => (typeof value === 'number' ? value : 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
     const escapeHtml = (unsafe) => unsafe ? String(unsafe).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[m]) : "";
+    const dataAsArray = (dataObject) => dataObject ? Object.entries(dataObject).map(([id, value]) => ({...value, id })) : [];
     
+    // --- CARREGAMENTO DE DADOS (OTIMIZADO) ---
+    const setupDataListeners = () => {
+        const dataPaths = ['projects', 'clients', 'schedule', 'revenues', 'toReceive', 'equipment', 'checklist', 'inspirations', 'marketingPosts'];
+        dataPaths.forEach(path => {
+            database.ref(path).on('value', (snapshot) => {
+                localData[path] = snapshot.val() || (path === 'checklist' ? {} : {});
+                // Re-renderiza a página somente se a seção atual depender desses dados
+                if (document.getElementById(`${currentSection}-content`)?.classList.contains('active')) {
+                    renderPage(currentSection);
+                }
+            });
+        });
+    };
+
     // --- RENDERIZAÇÃO DE PÁGINAS ---
     const renderPage = (sectionId) => {
         currentSection = sectionId;
@@ -229,7 +237,44 @@ document.addEventListener('DOMContentLoaded', () => {
         const modal = modalContainer.querySelector('.modal');
         if (modal) { modal.style.display = 'none'; modalContainer.innerHTML = ''; }
     };
+
+    // --- LÓGICA DE CRUD (Criar, Ler, Atualizar, Deletar) OTIMIZADA ---
+    const handleFormSubmit = (e, itemType) => {
+        e.preventDefault();
+        const form = e.target;
+        const newItem = {};
+        Array.from(form.elements).forEach(el => { if(el.name) newItem[el.name] = el.value; });
+        
+        database.ref(itemType).push(newItem); // Usa .push() para criar um novo item com ID único
+        
+        closeModal();
+    };
+
+    const handleScheduleFormSubmit = (e) => {
+        e.preventDefault();
+        const form = e.target;
+        const eventId = form.elements.id ? form.elements.id.value : null;
+        const eventData = {
+            date: form.elements.date.value,
+            time: form.elements.time.value,
+            task: form.elements.task.value
+        };
+
+        if (eventId) { // Edit Mode
+            database.ref('schedule/' + eventId).update(eventData);
+        } else { // Create Mode
+            database.ref('schedule').push(eventData);
+        }
+        closeModal();
+    };
     
+    const handleDelete = (id, itemType, category = null) => {
+        if (confirm(`Tem certeza que deseja excluir este item?`)) {
+            const path = category ? `${itemType}/${category}/${id}` : `${itemType}/${id}`;
+            database.ref(path).remove();
+        }
+    };
+
     // --- MANIPULADORES DE EVENTOS (CLICKS) ---
     const handleContentClick = (e) => {
         const addBtn = e.target.closest('.add-button');
@@ -238,13 +283,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const deleteBtn = e.target.closest('.delete-btn');
         if (deleteBtn) {
             const { id, type, category } = deleteBtn.dataset;
-            if (id && type) handleDelete(parseInt(id), type, category);
+            if (id && type) handleDelete(id, type, category);
             return;
         }
 
         const calendarEvent = e.target.closest('.calendar-event');
         if (calendarEvent && calendarEvent.dataset.id) {
-            openAndHandleModal('agenda', null, parseInt(calendarEvent.dataset.id));
+            openAndHandleModal('agenda', null, calendarEvent.dataset.id);
             return;
         }
 
@@ -256,56 +301,17 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const markAsPaidBtn = e.target.closest('.mark-as-paid-btn');
         if (markAsPaidBtn) {
-            const itemId = parseInt(markAsPaidBtn.dataset.id);
-            const itemToPay = (allData.toReceive || []).find(item => item.id === itemId);
+            const itemId = markAsPaidBtn.dataset.id;
+            const itemToPay = localData.toReceive[itemId];
             if (itemToPay) {
-                if (!allData.revenues) allData.revenues = [];
-                allData.revenues.push({ id: Date.now(), description: itemToPay.description, amount: itemToPay.amount, date: new Date().toISOString().slice(0, 10) });
-                allData.toReceive = allData.toReceive.filter(item => item.id !== itemId);
-                saveData();
+                const newRevenue = { 
+                    description: itemToPay.description, 
+                    amount: itemToPay.amount, 
+                    date: new Date().toISOString().slice(0, 10) 
+                };
+                database.ref('revenues').push(newRevenue);
+                database.ref('toReceive/' + itemId).remove();
             }
-        }
-    };
-
-    // --- LÓGICA DE CRUD (Criar, Ler, Atualizar, Deletar) ---
-    const handleFormSubmit = (e, itemType) => {
-        e.preventDefault();
-        const form = e.target;
-        const newItem = { id: Date.now() };
-        Array.from(form.elements).forEach(el => { if(el.name) newItem[el.name] = el.value; });
-        if (!allData[itemType]) allData[itemType] = [];
-        allData[itemType].push(newItem);
-        closeModal();
-        saveData();
-    };
-
-    const handleScheduleFormSubmit = (e) => {
-        e.preventDefault();
-        const form = e.target;
-        const eventId = form.elements.id ? parseInt(form.elements.id.value) : null;
-        if (eventId) { // Edit Mode
-            const eventIndex = (allData.schedule || []).findIndex(item => item.id === eventId);
-            if (eventIndex > -1) {
-                allData.schedule[eventIndex] = { ...allData.schedule[eventIndex], date: form.elements.date.value, time: form.elements.time.value, task: form.elements.task.value };
-            }
-        } else { // Create Mode
-            if (!allData.schedule) allData.schedule = [];
-            allData.schedule.push({ id: Date.now(), date: form.elements.date.value, time: form.elements.time.value, task: form.elements.task.value });
-        }
-        closeModal();
-        saveData();
-    };
-    
-    const handleDelete = (id, itemType, category = null) => {
-        if (confirm(`Tem certeza que deseja excluir este item?`)) {
-            if (category) {
-                if (allData[itemType] && Array.isArray(allData[itemType][category])) {
-                    allData[itemType][category] = allData[itemType][category].filter(item => item.id !== id);
-                }
-            } else if (Array.isArray(allData[itemType])) {
-                allData[itemType] = allData[itemType].filter(item => item.id !== id);
-            }
-            saveData();
         }
     };
 
@@ -314,7 +320,7 @@ document.addEventListener('DOMContentLoaded', () => {
         switch (type) {
             case 'agenda':
                 const isEditing = itemId !== null;
-                const event = isEditing ? ((allData.schedule || []).find(item => item.id === itemId) || {}) : { date: date || new Date().toISOString().slice(0, 10), time: '', task: '' };
+                const event = isEditing ? (localData.schedule[itemId] || {}) : { date: date || new Date().toISOString().slice(0, 10), time: '', task: '' };
                 modalHTML = `<div class="modal"><div class="modal-content"><span class="close-modal-btn">&times;</span><h2>${isEditing ? 'Editar' : 'Novo'} Compromisso</h2><form id="schedule-form">
                     ${isEditing ? `<input type="hidden" name="id" value="${itemId}">` : ''}
                     <div class="form-group"><label>Data</label><input type="date" name="date" value="${escapeHtml(event.date)}" required></div>
@@ -328,7 +334,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (isEditing) getEl('delete-event-btn').onclick = () => { handleDelete(itemId, 'schedule'); closeModal(); };
                 return;
             case 'projetos': formId = 'project-form'; itemType = 'projects';
-                let clientOptions = (allData.clients || []).map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('');
+                let clientOptions = dataAsArray(localData.clients).map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('');
                 modalHTML = `<div class="modal"><div class="modal-content"><span class="close-modal-btn">&times;</span><h2>Novo Projeto</h2><form id="${formId}"><div class="form-group"><label>Nome do Projeto</label><input type="text" name="name" required></div><div class="form-group"><label>Cliente</label><select name="client" required><option value="">Selecione</option>${clientOptions}</select></div><button type="submit">Adicionar</button></form></div></div>`; break;
             case 'clientes': formId = 'client-form'; itemType = 'clients';
                 modalHTML = `<div class="modal"><div class="modal-content"><span class="close-modal-btn">&times;</span><h2>Novo Cliente</h2><form id="${formId}"><div class="form-group"><label>Nome</label><input type="text" name="name" required></div><div class="form-group"><label>Contato</label><input type="text" name="contact"></div><button type="submit">Salvar</button></form></div></div>`; break;
@@ -346,12 +352,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 getEl('idea-form').onsubmit = (e) => {
                     e.preventDefault();
                     const title = e.target.title.value, videoUrl = e.target.videoUrl.value, imageFile = e.target.imageFile.files[0];
-                    if (!allData.inspirations) allData.inspirations = [];
                     if (imageFile) {
                         const reader = new FileReader();
-                        reader.onloadend = () => { allData.inspirations.push({ id: Date.now(), title, type: 'image', data: reader.result }); saveData(); };
+                        reader.onloadend = () => { database.ref('inspirations').push({ title, type: 'image', data: reader.result }); };
                         reader.readAsDataURL(imageFile);
-                    } else if (videoUrl) { allData.inspirations.push({ id: Date.now(), title, type: 'video', data: videoUrl }); saveData(); }
+                    } else if (videoUrl) { database.ref('inspirations').push({ title, type: 'video', data: videoUrl }); }
                     closeModal();
                 }; return;
         }
@@ -364,12 +369,17 @@ document.addEventListener('DOMContentLoaded', () => {
     
     templates['visao-geral'] = () => `<div class="search-bar"><input type="text" placeholder="Buscar..."></div><div class="stats-grid"><div class="stat-card highlight-card"><div class="card-header"><div class="card-icon">↗</div></div><div><div class="card-title">Total de Projetos</div><div class="card-value" id="summary-total-projects">0</div></div></div><div class="stat-card"><div class="card-header"><div class="card-icon">↗</div></div><div class="card-title">Pagamentos Recebidos</div><div class="card-value" id="summary-total-payment">R$ 0,00</div></div><div class="stat-card"><div class="card-header"><div class="card-icon">↗</div></div><div class="card-title">Clientes</div><div class="card-value" id="summary-total-clients">0</div></div></div><h2 class="section-title" style="margin-bottom: 16px;">Visão Geral do Estoque</h2><div class="stock-overview"><div class="stock-item"><div class="status"><span class="dot green"></span> Funcional</div><div class="value" id="stock-in-stock">0</div></div><div class="stock-item"><div class="status"><span class="dot orange"></span> Manutenção</div><div class="value" id="stock-low-stock">0</div></div><div class="stock-item"><div class="status"><span class="dot red"></span> Quebrado</div><div class="value" id="stock-out-of-stock">0</div></div></div>`;
     renderFunctions['visao-geral'] = () => {
-        getEl('summary-total-projects').textContent = (allData.projects || []).length;
-        getEl('summary-total-payment').textContent = formatCurrency((allData.revenues || []).reduce((sum, r) => sum + parseFloat(r.amount || 0), 0));
-        getEl('summary-total-clients').textContent = (allData.clients || []).length;
-        getEl('stock-in-stock').textContent = (allData.equipment || []).filter(e => e.status === 'funcional').length;
-        getEl('stock-low-stock').textContent = (allData.equipment || []).filter(e => e.status === 'manutencao').length;
-        getEl('stock-out-of-stock').textContent = (allData.equipment || []).filter(e => e.status === 'quebrado').length;
+        const projects = dataAsArray(localData.projects);
+        const revenues = dataAsArray(localData.revenues);
+        const clients = dataAsArray(localData.clients);
+        const equipment = dataAsArray(localData.equipment);
+        
+        getEl('summary-total-projects').textContent = projects.length;
+        getEl('summary-total-payment').textContent = formatCurrency(revenues.reduce((sum, r) => sum + parseFloat(r.amount || 0), 0));
+        getEl('summary-total-clients').textContent = clients.length;
+        getEl('stock-in-stock').textContent = equipment.filter(e => e.status === 'funcional').length;
+        getEl('stock-low-stock').textContent = equipment.filter(e => e.status === 'manutencao').length;
+        getEl('stock-out-of-stock').textContent = equipment.filter(e => e.status === 'quebrado').length;
     };
     
     templates.agenda = () => `<div class="calendar-header"><button id="prev-month-btn" class="calendar-nav-btn">‹</button><h2 id="month-year-display"></h2><button id="next-month-btn" class="calendar-nav-btn">›</button></div><div class="calendar-grid"><div class="calendar-weekday">DOM</div><div class="calendar-weekday">SEG</div><div class="calendar-weekday">TER</div><div class="calendar-weekday">QUA</div><div class="calendar-weekday">QUI</div><div class="calendar-weekday">SEX</div><div class="calendar-weekday">SÁB</div></div><div class="calendar-grid" id="calendar-body"></div>`;
@@ -379,10 +389,13 @@ document.addEventListener('DOMContentLoaded', () => {
         monthYearDisplay.textContent = new Date(year, month).toLocaleString('pt-BR', { month: 'long', year: 'numeric' }).toUpperCase();
         const firstDay = new Date(year, month, 1).getDay(), daysInMonth = new Date(year, month + 1, 0).getDate();
         const today = new Date(), todayString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        
+        const scheduleArray = dataAsArray(localData.schedule);
+
         calendarBody.innerHTML = Array(firstDay).fill('<div class="calendar-day not-current-month"></div>').join('');
         for (let day = 1; day <= daysInMonth; day++) {
             const dateString = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-            const dayEvents = (allData.schedule || []).filter(s => s.date === dateString).sort((a,b) => a.time.localeCompare(b.time));
+            const dayEvents = scheduleArray.filter(s => s.date === dateString).sort((a,b) => a.time.localeCompare(b.time));
             const eventsHTML = dayEvents.map(event => `<div class="calendar-event" data-id="${event.id}">${escapeHtml(event.time)} - ${escapeHtml(event.task)}</div>`).join('');
             calendarBody.innerHTML += `<div class="calendar-day can-add ${dateString === todayString ? 'today' : ''}" data-date="${dateString}"><div class="calendar-day-number">${day}</div>${eventsHTML}</div>`;
         }
@@ -392,41 +405,44 @@ document.addEventListener('DOMContentLoaded', () => {
     
     templates.projetos = () => `<div class="section-header"><h2 class="section-title">Projetos</h2><button class="add-button" data-type="projetos">Adicionar</button></div><div id="project-list"></div>`;
     renderFunctions.projetos = () => {
-        const container = getEl('project-list'), projects = allData.projects || [];
+        const container = getEl('project-list'), projects = dataAsArray(localData.projects);
         container.innerHTML = projects.length === 0 ? `<div class="list-container"><p class="no-data-message">Nenhum projeto cadastrado.</p></div>` : projects.map(p => `<div class="list-container" style="margin-bottom:12px;"><div class="list-item"><div class="list-item-details"><div class="list-item-title">${escapeHtml(p.name)}</div><div class="list-item-subtitle">${escapeHtml(p.client)}</div></div><button class="delete-btn" data-id="${p.id}" data-type="projects">🗑️</button></div></div>`).join('');
     };
 
     templates.clientes = () => `<div class="section-header"><h2 class="section-title">Clientes</h2><button class="add-button" data-type="clientes">Adicionar</button></div><div id="client-list"></div>`;
     renderFunctions.clientes = () => {
-        const list = getEl('client-list'), clients = allData.clients || [];
+        const list = getEl('client-list'), clients = dataAsArray(localData.clients);
         list.innerHTML = clients.length === 0 ? `<div class="list-container"><p class="no-data-message">Nenhum cliente cadastrado.</p></div>` : `<div class="list-container">${clients.map(c => `<div class="list-item"><div class="list-item-details"><div class="list-item-title">${escapeHtml(c.name)}</div><div class="list-item-subtitle">${escapeHtml(c.contact)}</div></div><button class="delete-btn" data-id="${c.id}" data-type="clients">🗑️</button></div>`).join('')}</div>`;
     };
     
     templates.financeiro = () => `<div class="section-header"><h2 class="section-title">Financeiro</h2><div><button class="add-button" data-type="revenue" style="margin-right:10px;">+ Receita</button><button class="add-button" data-type="toReceive" style="background-color: var(--accent-yellow); color: var(--bg-main);">+ A Receber</button></div></div><h3 style="margin:24px 0 16px;font-size:1.1rem;color:var(--accent-yellow);">Contas a Receber</h3><div class="list-container" id="to-receive-list"></div><h3 style="margin:24px 0 16px;font-size:1.1rem;">Histórico de Transações</h3><div class="list-container" id="transaction-list"></div>`;
     renderFunctions.financeiro = () => {
-        const toReceiveList = getEl('to-receive-list'), pendingRevenues = (allData.toReceive || []).sort((a,b) => new Date(a.dueDate) - new Date(b.dueDate));
+        const toReceiveList = getEl('to-receive-list'), pendingRevenues = dataAsArray(localData.toReceive).sort((a,b) => new Date(a.dueDate) - new Date(b.dueDate));
         toReceiveList.innerHTML = pendingRevenues.length === 0 ? `<p class="no-data-message">Nenhuma conta a receber.</p>` : pendingRevenues.map(t => `<div class="list-item"><div class="list-item-details"><div class="list-item-title">${escapeHtml(t.description)}</div><div class="list-item-subtitle">Vence em: ${escapeHtml(t.dueDate)}</div></div><div class="list-item-side-text side-text-revenue">${formatCurrency(parseFloat(t.amount))}</div><button class="add-button mark-as-paid-btn" data-id="${t.id}" style="margin-left:10px;background-color:var(--accent-secondary);font-size:0.8em;padding:8px 12px;">Pago</button></div>`).join('');
-        const transactionList = getEl('transaction-list'), transactions = (allData.revenues || []).sort((a,b) => new Date(b.date) - new Date(a.date));
+        const transactionList = getEl('transaction-list'), transactions = dataAsArray(localData.revenues).sort((a,b) => new Date(b.date) - new Date(a.date));
         transactionList.innerHTML = transactions.length === 0 ? `<p class="no-data-message">Nenhuma transação registrada.</p>` : transactions.map(t => `<div class="list-item"><div class="list-item-details"><div class="list-item-title">${escapeHtml(t.description)}</div><div class="list-item-subtitle">${escapeHtml(t.date)}</div></div><div class="list-item-side-text side-text-revenue">+ ${formatCurrency(parseFloat(t.amount))}</div></div>`).join('');
     };
 
     templates.equipamentos = () => `<div class="section-header"><h2 class="section-title">Equipamentos</h2><button class="add-button" data-type="equipamentos">Adicionar</button></div><div id="equipment-list"></div>`;
     renderFunctions.equipamentos = () => {
-        const list = getEl('equipment-list'), equipment = allData.equipment || [];
+        const list = getEl('equipment-list'), equipment = dataAsArray(localData.equipment);
         list.innerHTML = equipment.length === 0 ? `<p class="no-data-message">Nenhum equipamento cadastrado.</p>` : `<div class="list-container">${equipment.map(eq => `<div class="list-item"><div class="list-item-details"><div class="list-item-title">${escapeHtml(eq.item)}</div><div class="list-item-subtitle">${escapeHtml(eq.model)}</div></div><span class="status-badge status-${eq.status}">${eq.status}</span><button class="delete-btn" data-id="${eq.id}" data-type="equipment">🗑️</button></div>`).join('')}</div>`;
     };
 
     templates.checklist = () => `<div class="section-header"><h2 class="section-title">Checklist</h2></div><div class="list-container" style="margin-bottom:24px;"><div class="section-header"><h3>Pré-Produção</h3><button class="add-checklist-item-btn" data-category="pre">+</button></div><ul id="checklist-pre"></ul></div><div class="list-container" style="margin-bottom:24px;"><div class="section-header"><h3>Dia do Job</h3><button class="add-checklist-item-btn" data-category="dia">+</button></div><ul id="checklist-dia"></ul></div><div class="list-container"><div class="section-header"><h3>Pós-Produção</h3><button class="add-checklist-item-btn" data-category="pos">+</button></div><ul id="checklist-pos"></ul></div>`;
     renderFunctions.checklist = () => {
-        const renderCategory = (key) => { getEl(`checklist-${key}`).innerHTML = (allData.checklist[key] || []).map(item => `<li><label><input type="checkbox" data-id="${item.id}" data-category="${key}" ${item.checked ? 'checked' : ''}> ${escapeHtml(item.text)}</label><button class="delete-btn" data-id="${item.id}" data-type="checklist" data-category="${key}">🗑️</button></li>`).join(''); };
+        const renderCategory = (key) => { 
+            const items = dataAsArray(localData.checklist[key]);
+            getEl(`checklist-${key}`).innerHTML = items.map(item => `<li><label><input type="checkbox" data-id="${item.id}" data-category="${key}" ${item.checked ? 'checked' : ''}> ${escapeHtml(item.text)}</label><button class="delete-btn" data-id="${item.id}" data-type="checklist" data-category="${key}">🗑️</button></li>`).join(''); 
+        };
         ['pre', 'dia', 'pos'].forEach(renderCategory);
-        document.querySelectorAll('.add-checklist-item-btn').forEach(btn => btn.onclick = (e) => { const category = e.target.dataset.category, text = prompt('Nova tarefa:'); if (text) { if (!allData.checklist[category]) allData.checklist[category] = []; allData.checklist[category].push({ id: Date.now(), text, checked: false }); saveData(); } });
-        document.querySelectorAll('.list-container input[type=checkbox]').forEach(box => box.onchange = (e) => { const { id, category } = e.target.dataset; const item = (allData.checklist[category] || []).find(i => i.id == id); if (item) { item.checked = e.target.checked; saveData(); } });
+        document.querySelectorAll('.add-checklist-item-btn').forEach(btn => btn.onclick = (e) => { const category = e.target.dataset.category, text = prompt('Nova tarefa:'); if (text) { database.ref(`checklist/${category}`).push({ text, checked: false }); } });
+        document.querySelectorAll('.list-container input[type=checkbox]').forEach(box => box.onchange = (e) => { const { id, category } = e.target.dataset; database.ref(`checklist/${category}/${id}/checked`).set(e.target.checked); });
     };
     
     templates.ideias = () => `<div class="section-header"><h2 class="section-title">Ideias</h2><button class="add-button" data-type="ideias">Adicionar</button></div><div class="ideas-grid" id="ideas-grid"></div>`;
     renderFunctions.ideias = () => {
-        const grid = getEl('ideas-grid'), inspirations = allData.inspirations || [];
+        const grid = getEl('ideas-grid'), inspirations = dataAsArray(localData.inspirations);
         if (inspirations.length === 0) grid.innerHTML = `<p class="no-data-message" style="width:100%;">Nenhuma ideia salva.</p>`;
         else grid.innerHTML = inspirations.map(i => {
             let mediaHTML = '';
@@ -445,16 +461,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     templates.marketing = () => `<div class="section-header"><h2 class="section-title">Marketing</h2><button class="add-button" data-type="marketing">Adicionar Post</button></div><div id="marketing-list"></div>`;
     renderFunctions.marketing = () => {
-        const list = getEl('marketing-list'), posts = allData.marketingPosts || [];
+        const list = getEl('marketing-list'), posts = dataAsArray(localData.marketingPosts);
         list.innerHTML = posts.length === 0 ? `<div class="list-container"><p class="no-data-message">Nenhum post planejado.</p></div>` : `<div class="list-container">${posts.map(p => `<div class="list-item"><div class="list-item-details"><div class="list-item-title">${escapeHtml(p.content)}</div><div class="list-item-subtitle">${escapeHtml(p.channel)}</div></div><span class="status-badge status-${p.status}">${p.status}</span><button class="delete-btn" data-id="${p.id}" data-type="marketingPosts">🗑️</button></div>`).join('')}</div>`;
     };
 
     // --- INICIALIZAÇÃO DO APLICATIVO ---
     const initializeApp = () => {
-        // CORREÇÃO: Renderiza a UI inicial imediatamente com dados zerados
-        renderPage(currentSection);
-
-        // Adiciona os listeners de navegação
         contentArea.addEventListener('click', handleContentClick);
         document.querySelector('.bottom-tab-bar').addEventListener('click', (e) => {
             const link = e.target.closest('.tab-item');
@@ -474,8 +486,9 @@ document.addEventListener('DOMContentLoaded', () => {
             };
         };
 
-        // Inicia o listener do Firebase para carregar os dados reais
-        loadData();
+        // Renderiza a UI inicial e depois carrega os dados
+        renderPage(currentSection);
+        setupDataListeners();
     };
 
     initializeApp();
