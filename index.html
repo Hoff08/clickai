@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -16,6 +15,8 @@
     <!-- SDKs do Firebase -->
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+    <!-- SCRIPT DO STORAGE ADICIONADO -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-storage.js"></script>
     
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
@@ -170,13 +171,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- INICIALIZAÇÃO DO APP ---
     firebase.initializeApp(firebaseConfig);
     const database = firebase.database();
+    const storage = firebase.storage(); // Inicializa o Firebase Storage
     
     const getEl = (id) => document.getElementById(id);
     const modalContainer = getEl('modal-container');
     const contentArea = getEl('content-area');
 
     // --- ARMAZENAMENTO LOCAL DOS DADOS ---
-    // Este objeto irá guardar os dados recebidos do Firebase
     let localData = {
         projects: {}, clients: {}, schedule: {}, tasks: {}, expenses: {}, revenues: {}, toReceive: {}, 
         equipment: {}, checklist: { pre: {}, dia: {}, pos: {} }, inspirations: {}, marketingPosts: {}
@@ -197,7 +198,6 @@ document.addEventListener('DOMContentLoaded', () => {
         dataPaths.forEach(path => {
             database.ref(path).on('value', (snapshot) => {
                 localData[path] = snapshot.val() || (path === 'checklist' ? {} : {});
-                // Re-renderiza a página somente se a seção atual depender desses dados
                 if (document.getElementById(`${currentSection}-content`)?.classList.contains('active')) {
                     renderPage(currentSection);
                 }
@@ -245,7 +245,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const newItem = {};
         Array.from(form.elements).forEach(el => { if(el.name) newItem[el.name] = el.value; });
         
-        database.ref(itemType).push(newItem); // Usa .push() para criar um novo item com ID único
+        database.ref(itemType).push(newItem);
         
         closeModal();
     };
@@ -260,9 +260,9 @@ document.addEventListener('DOMContentLoaded', () => {
             task: form.elements.task.value
         };
 
-        if (eventId) { // Edit Mode
+        if (eventId) {
             database.ref('schedule/' + eventId).update(eventData);
-        } else { // Create Mode
+        } else {
             database.ref('schedule').push(eventData);
         }
         closeModal();
@@ -346,19 +346,59 @@ document.addEventListener('DOMContentLoaded', () => {
                 modalHTML = `<div class="modal"><div class="modal-content"><span class="close-modal-btn">&times;</span><h2>Novo Equipamento</h2><form id="${formId}"><div class="form-group"><label>Item</label><input type="text" name="item" required></div><div class="form-group"><label>Modelo</label><input type="text" name="model"></div><div class="form-group"><label>Status</label><select name="status"><option value="funcional">Funcional</option><option value="manutencao">Manutenção</option><option value="quebrado">Quebrado</option></select></div><button type="submit">Adicionar</button></form></div></div>`; break;
             case 'marketing': formId = 'post-form'; itemType = 'marketingPosts';
                 modalHTML = `<div class="modal"><div class="modal-content"><span class="close-modal-btn">&times;</span><h2>Novo Post</h2><form id="${formId}"><div class="form-group"><label>Conteúdo</label><input type="text" name="content" required></div><div class="form-group"><label>Canal</label><select name="channel"><option>Instagram</option><option>TikTok</option><option>Blog</option></select></div><div class="form-group"><label>Status</label><select name="status"><option value="planejado">Planejado</option><option value="entregue">Entregue</option><option value="cancelado">Cancelado</option></select></div><button type="submit">Adicionar</button></form></div></div>`; break;
+            
+            // --- LÓGICA DE UPLOAD DE IDEIAS CORRIGIDA ---
             case 'ideias':
                 modalHTML = `<div class="modal"><div class="modal-content"><span class="close-modal-btn">&times;</span><h2>Nova Ideia</h2><form id="idea-form"><div class="form-group"><label>Título</label><input type="text" name="title" required></div><div class="form-group"><label>Link do Vídeo (YouTube)</label><input type="text" name="videoUrl"></div><div class="form-group"><label>Ou Imagem</label><input type="file" name="imageFile" accept="image/*"></div><button type="submit">Adicionar</button></form></div></div>`;
                 openModal(modalHTML);
                 getEl('idea-form').onsubmit = (e) => {
                     e.preventDefault();
-                    const title = e.target.title.value, videoUrl = e.target.videoUrl.value, imageFile = e.target.imageFile.files[0];
+                    const title = e.target.title.value;
+                    const videoUrl = e.target.videoUrl.value;
+                    const imageFile = e.target.imageFile.files[0];
+                    const submitButton = e.target.querySelector('button[type="submit"]');
+
+                    submitButton.disabled = true;
+                    submitButton.textContent = 'Enviando...';
+
                     if (imageFile) {
-                        const reader = new FileReader();
-                        reader.onloadend = () => { database.ref('inspirations').push({ title, type: 'image', data: reader.result }); };
-                        reader.readAsDataURL(imageFile);
-                    } else if (videoUrl) { database.ref('inspirations').push({ title, type: 'video', data: videoUrl }); }
-                    closeModal();
-                }; return;
+                        // 1. Criar um nome de arquivo único
+                        const fileName = `${Date.now()}-${imageFile.name}`;
+                        // 2. Criar uma referência no Storage
+                        const storageRef = storage.ref('inspirations/' + fileName);
+                        // 3. Fazer o upload do arquivo
+                        const uploadTask = storageRef.put(imageFile);
+
+                        // 4. Aguardar o upload e salvar a URL no banco de dados
+                        uploadTask.on('state_changed', 
+                            (snapshot) => { /* pode adicionar um indicador de progresso aqui se quiser */ }, 
+                            (error) => { 
+                                console.error("Erro no upload: ", error); 
+                                alert("Falha ao enviar imagem.");
+                                submitButton.disabled = false;
+                                submitButton.textContent = 'Adicionar';
+                            }, 
+                            () => {
+                                // 5. Obter a URL de download
+                                uploadTask.snapshot.ref.getDownloadURL().then((downloadURL) => {
+                                    // 6. Salvar a URL no Realtime Database
+                                    database.ref('inspirations').push({ title: title, type: 'image', data: downloadURL });
+                                    closeModal();
+                                });
+                            }
+                        );
+                    } else if (videoUrl) {
+                        // Se for um vídeo, a lógica permanece a mesma
+                        database.ref('inspirations').push({ title: title, type: 'video', data: videoUrl });
+                        closeModal();
+                    } else {
+                        alert("Por favor, adicione um vídeo ou uma imagem.");
+                        submitButton.disabled = false;
+                        submitButton.textContent = 'Adicionar';
+                    }
+                }; 
+                return;
+            // --- FIM DA LÓGICA CORRIGIDA ---
         }
         openModal(modalHTML);
         if (formId) getEl(formId).onsubmit = (e) => handleFormSubmit(e, itemType);
@@ -486,7 +526,6 @@ document.addEventListener('DOMContentLoaded', () => {
             };
         };
 
-        // Renderiza a UI inicial e depois carrega os dados
         renderPage(currentSection);
         setupDataListeners();
     };
